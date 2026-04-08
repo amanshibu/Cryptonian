@@ -28,11 +28,15 @@ class DecisionAgent:
         self.consecutive_losses = 0
         self.kill_switch_activated_at = 0.0  # timestamp when kill switch engaged
 
-    def formulate_decision(self, strategy_output, current_price, current_balance, adaptive_params=None):
+    def formulate_decision(self, strategy_output, current_price, current_balance, adaptive_params=None, current_ts=None):
         """
         Validates the strategy output against risk parameters and portfolio state.
         Returns an actionable decision dictionary.
         """
+        if current_ts is None:
+            current_ts = time.time()
+        self._current_ts = current_ts
+            
         if adaptive_params is None:
             adaptive_params = {}
             
@@ -56,7 +60,7 @@ class DecisionAgent:
         # ── NEW: Improvement 4 — Kill Switch Check ────────────────────
         if self.consecutive_losses >= self.config.LOSS_STREAK_LIMIT:
             cooldown_sec = self.config.KILL_SWITCH_COOLDOWN_MINUTES * 60
-            elapsed = time.time() - self.kill_switch_activated_at
+            elapsed = current_ts - self.kill_switch_activated_at
             if elapsed < cooldown_sec:
                 remaining = int(cooldown_sec - elapsed)
                 decision["reason"] = (
@@ -72,8 +76,9 @@ class DecisionAgent:
                 self.kill_switch_activated_at = 0
             
         # 2. Check Risk Management (SL / Partial TP) first if we have a position
-        if self.current_position == "LONG":
-            profit_pct = (current_price - self.entry_price) / self.entry_price
+        if self.current_position in ["LONG", "SHORT"]:
+            is_long = self.current_position == "LONG"
+            profit_pct = (current_price - self.entry_price) / self.entry_price if is_long else (self.entry_price - current_price) / self.entry_price
             
             # Use dynamic or config fallback percentages
             eff_sl_pct = self.current_trade_sl_pct if self.current_trade_sl_pct > 0 else getattr(self.config, 'STOP_LOSS_PCT', 0.02)
@@ -84,17 +89,16 @@ class DecisionAgent:
             # SL hit → close ALL remaining
             if profit_pct <= -eff_sl_pct:
                 sell_amount_base = self.position_size_base
-                decision["action"] = "SELL"
+                decision["action"] = "SELL" if is_long else "BUY"
                 decision["amount_usdt"] = sell_amount_base * current_price
                 decision["reason"] = f"Stop Loss Hit! ({profit_pct*100:.2f}%)"
                 
                 # Update PnL & state
-                self.daily_pnl += decision["amount_usdt"] - (sell_amount_base * self.entry_price)
+                pnl = (decision["amount_usdt"] - (sell_amount_base * self.entry_price)) if is_long else ((sell_amount_base * self.entry_price) - decision["amount_usdt"])
+                self.daily_pnl += pnl
                 self.current_position = None
                 self.tp1_hit = False
-                self.last_trade_time = time.time()
-
-                # ── NEW: Improvement 4 — Track loss streak ────────────
+                self.last_trade_time = current_ts
                 self._record_loss()
                 return decision
 
@@ -103,36 +107,41 @@ class DecisionAgent:
                 close_fraction = getattr(self.config, 'TP1_CLOSE_FRACTION', 0.5)
                 sell_amount_base = self.position_size_base * close_fraction
                 
-                decision["action"] = "PARTIAL_SELL"
+                decision["action"] = "PARTIAL_SELL" if is_long else "PARTIAL_BUY"
                 decision["amount_usdt"] = sell_amount_base * current_price
                 decision["reason"] = f"TP1 Hit! ({profit_pct*100:.2f}%) — closing {close_fraction*100:.0f}%"
                 
                 # Update PnL & reduce position
-                self.daily_pnl += decision["amount_usdt"] - (sell_amount_base * self.entry_price)
+                pnl = (decision["amount_usdt"] - (sell_amount_base * self.entry_price)) if is_long else ((sell_amount_base * self.entry_price) - decision["amount_usdt"])
+                self.daily_pnl += pnl
                 self.position_size_base -= sell_amount_base
                 self.tp1_hit = True
-                self.last_trade_time = time.time()
-
-                # TP1 is a win
+                self.last_trade_time = current_ts
                 self._record_win()
                 return decision
                 
             # ── NEW: Improvement 3 — Trailing Stop Loss ───────────────
-            if current_price > self.trailing_sl_price:
-                self.trailing_sl_price = current_price
+            if is_long:
+                if current_price > self.trailing_sl_price:
+                    self.trailing_sl_price = current_price
+                hit_trailing = current_price <= self.trailing_sl_price * (1 - eff_trail_pct)
+            else:
+                if current_price < self.trailing_sl_price:
+                    self.trailing_sl_price = current_price
+                hit_trailing = current_price >= self.trailing_sl_price * (1 + eff_trail_pct)
             
-            if current_price <= self.trailing_sl_price * (1 - eff_trail_pct):
+            if hit_trailing:
                 sell_amount_base = self.position_size_base
-                decision["action"] = "SELL"
+                decision["action"] = "SELL" if is_long else "BUY"
                 decision["amount_usdt"] = sell_amount_base * current_price
                 decision["reason"] = f"Trailing Stop Hit! (peaked at {self.trailing_sl_price:.2f})"
                 
                 # Update PnL & state
-                pnl = decision["amount_usdt"] - (sell_amount_base * self.entry_price)
+                pnl = (decision["amount_usdt"] - (sell_amount_base * self.entry_price)) if is_long else ((sell_amount_base * self.entry_price) - decision["amount_usdt"])
                 self.daily_pnl += pnl
                 self.current_position = None
                 self.tp1_hit = False
-                self.last_trade_time = time.time()
+                self.last_trade_time = current_ts
                 
                 if pnl > 0: self._record_win()
                 else: self._record_loss()
@@ -141,29 +150,32 @@ class DecisionAgent:
             # ── NEW: Improvement 3 — Full Take Profit (TP2) ──────────
             if profit_pct >= eff_tp2_pct:
                 sell_amount_base = self.position_size_base
-                decision["action"] = "SELL"
+                decision["action"] = "SELL" if is_long else "BUY"
                 decision["amount_usdt"] = sell_amount_base * current_price
                 decision["reason"] = f"TP2 Hit! ({profit_pct*100:.2f}%) — closing remaining"
                 
                 # Update PnL & state
-                self.daily_pnl += decision["amount_usdt"] - (sell_amount_base * self.entry_price)
+                pnl = (decision["amount_usdt"] - (sell_amount_base * self.entry_price)) if is_long else ((sell_amount_base * self.entry_price) - decision["amount_usdt"])
+                self.daily_pnl += pnl
                 self.current_position = None
                 self.tp1_hit = False
-                self.last_trade_time = time.time()
+                self.last_trade_time = current_ts
 
                 self._record_win()
                 return decision
-                
+
         # 3. Check Cooldown
-        current_time = time.time()
         cd_min = getattr(self.config, 'COOLDOWN_WIN_MINUTES', 5) if self.last_trade_was_win else getattr(self.config, 'COOLDOWN_LOSS_MINUTES', 15)
-        if (current_time - self.last_trade_time) < (cd_min * 60):
+        if (current_ts - self.last_trade_time) < (cd_min * 60):
             decision["reason"] = f"In cooldown period ({cd_min}m)."
             return decision
-            
+
         # 4. Process Signal
-        if raw_signal == "BUY" and self.current_position != "LONG":
-            decision["action"] = "BUY"
+        # Wait for SL/TP to hit, ignore opposing signals during active trades!
+
+        # Open new position if flat
+        if (raw_signal in ["BUY", "SELL"]) and self.current_position is None:
+            decision["action"] = raw_signal
             
             # Dynamic position sizing
             base_risk_amount = current_balance * self.config.RISK_PERCENT_PER_TRADE
@@ -190,11 +202,10 @@ class DecisionAgent:
             # Set Dynamic Exits based on current ATR Value 
             atr_value = strategy_output.get("atr_value", 0.0)
             if atr_value > 0 and current_price > 0:
-                self.current_trade_sl_pct = (atr_value * getattr(self.config, 'SL_ATR_MULTIPLIER', 2.0)) / current_price
-                self.current_trade_tp1_pct = (atr_value * getattr(self.config, 'TP1_ATR_MULTIPLIER', 2.5)) / current_price
-                self.current_trade_tp2_pct = (atr_value * getattr(self.config, 'TP2_ATR_MULTIPLIER', 4.0)) / current_price
-                self.current_trade_trail_pct = (atr_value * getattr(self.config, 'TRAIL_SL_ATR_MULTIPLIER', 1.5)) / current_price
-                reason += f" [Dyn SL: {self.current_trade_sl_pct*100:.2f}%, TP: {self.current_trade_tp1_pct*100:.2f}%]"
+                self.current_trade_sl_pct = max((atr_value * getattr(self.config, 'SL_ATR_MULTIPLIER', 3.0)) / current_price, 0.003)
+                self.current_trade_tp1_pct = max((atr_value * getattr(self.config, 'TP1_ATR_MULTIPLIER', 1.5)) / current_price, 0.002)
+                self.current_trade_tp2_pct = max((atr_value * getattr(self.config, 'TP2_ATR_MULTIPLIER', 3.0)) / current_price, 0.004)
+                self.current_trade_trail_pct = max((atr_value * getattr(self.config, 'TRAIL_SL_ATR_MULTIPLIER', 1.5)) / current_price, 0.002)
             else:
                 self.current_trade_sl_pct = 0.0
                 self.current_trade_tp1_pct = 0.0
@@ -209,32 +220,15 @@ class DecisionAgent:
                 reason += f" (Off-session, size x{multiplier})"
                 
             decision["amount_usdt"] = base_risk_amount
-            decision["reason"] = reason
+            decision["reason"] = f"Opening {'LONG' if raw_signal == 'BUY' else 'SHORT'}: {reason}"
             
             # Update state
-            self.current_position = "LONG"
+            self.current_position = "LONG" if raw_signal == "BUY" else "SHORT"
             self.entry_price = current_price
             self.trailing_sl_price = current_price
             self.position_size_base = decision["amount_usdt"] / current_price
             self.tp1_hit = False
-            self.last_trade_time = current_time
-            
-        elif raw_signal == "SELL" and self.current_position == "LONG":
-            decision["action"] = "SELL"
-            decision["amount_usdt"] = self.position_size_base * current_price
-            decision["reason"] = f"Strategy SELL Signal: {reason}"
-            
-            # Determine win/loss
-            pnl = decision["amount_usdt"] - (self.position_size_base * self.entry_price)
-            self.daily_pnl += pnl
-            self.current_position = None
-            self.tp1_hit = False
-            self.last_trade_time = current_time
-
-            if pnl >= 0:
-                self._record_win()
-            else:
-                self._record_loss()
+            self.last_trade_time = current_ts
             
         else:
             decision["reason"] = f"Signal {raw_signal} matched steady state or HOLD."
@@ -255,9 +249,9 @@ class DecisionAgent:
         self.consecutive_losses += 1
         self.last_trade_was_win = False
         if self.consecutive_losses >= self.config.LOSS_STREAK_LIMIT:
-            self.kill_switch_activated_at = time.time()
+            self.kill_switch_activated_at = getattr(self, '_current_ts', time.time())
             print(
-                f"[DecisionAgent] ⚠ KILL SWITCH ACTIVATED — "
+                f"[DecisionAgent] [!] KILL SWITCH ACTIVATED - "
                 f"{self.consecutive_losses} consecutive losses. "
                 f"Pausing for {self.config.KILL_SWITCH_COOLDOWN_MINUTES} min."
             )

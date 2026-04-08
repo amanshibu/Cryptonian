@@ -26,8 +26,10 @@ class ExecutionAgent:
             return {"status": "skipped", "message": "No trade action required."}
             
         # ── NEW: Treat PARTIAL_SELL like SELL for execution ───────────
-        is_partial = action == "PARTIAL_SELL"
-        effective_action = "SELL" if is_partial else action
+        is_partial = action in ["PARTIAL_SELL", "PARTIAL_BUY"]
+        if action == "PARTIAL_SELL": effective_action = "SELL"
+        elif action == "PARTIAL_BUY": effective_action = "BUY"
+        else: effective_action = action
 
         print(f"[ExecutionAgent] Executing {action} for {amount_usdt:.2f} USDT on {symbol}")
         

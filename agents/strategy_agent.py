@@ -38,6 +38,12 @@ class StrategyAgent:
         df['rolling_high_20'] = df['rolling_high_20'].shift(1)
         df['rolling_low_20'] = df['rolling_low_20'].shift(1)
         
+        # Bollinger Bands (Mean Reversion)
+        df['bb_mid'] = ta.sma(df['close'], length=20)
+        df['bb_std'] = df['close'].rolling(window=20).std()
+        df['bb_upper'] = df['bb_mid'] + (2.0 * df['bb_std'])
+        df['bb_lower'] = df['bb_mid'] - (2.0 * df['bb_std'])
+        
         return df
 
     # ── NEW: Improvement 2 — Time-Based Session Filter ─────────────────
@@ -58,46 +64,26 @@ class StrategyAgent:
         
         return False, True  # in_session=False, off_session=True
 
-    # ── NEW: Scoring System ───────────────────────────────────────────
+    # ── UPDATED SCORING SYSTEM (SMOOTH, NOT BINARY) ──
     def _calculate_score(self, latest, previous, price):
-        """
-        Calculates a score from 0-100 based on Trend, Volume, Volatility, momentum.
-        """
         score = 0
-        
-        # 1. Trend Score (Max 30)
-        if latest['ema_21'] > latest['ema_50']:
-            score += 15 # Uptrend
-            if price > latest['ema_21']:
-                score += 15
-        elif latest['ema_21'] < latest['ema_50']:
-            score += 15 # Downtrend
-            if price < latest['ema_21']:
-                score += 15
-                
-        # 2. Volume Score (Max 30)
-        vol_ratio = latest['volume'] / latest['volume_sma_20'] if latest['volume_sma_20'] > 0 else 0
-        if vol_ratio > 1.5:
-            score += 30
-        elif vol_ratio > 1.0:
-            score += 20
-        elif vol_ratio > 0.8:
-            score += 10
-            
-        # 3. Volatility Score (Max 20)
-        atr_ratio = latest['atr_14'] / latest['atr_sma_14'] if latest['atr_sma_14'] > 0 else 0
-        if atr_ratio > 1.2:
-            score += 20
-        elif atr_ratio > 1.0:
-            score += 10
-            
-        # 4. Momentum Score (Max 20)
-        # Using ROC for directional momentum strength. Absolute value for general momentum.
-        if abs(latest['roc_14']) > 1.0:
-            score += 20
-        elif abs(latest['roc_14']) > 0.5:
-            score += 10
-            
+
+        # Trend strength (0–30)
+        trend_strength = abs(latest['ema_21'] - latest['ema_50']) / price
+        score += min(trend_strength * 10000, 30)
+
+        # Volume (0–25)
+        vol_ratio = latest['volume'] / latest['volume_sma_20'] if latest['volume_sma_20'] > 0 else 1
+        score += min(vol_ratio * 10, 25)
+
+        # Volatility (0–20)
+        atr_ratio = latest['atr_14'] / latest['atr_sma_14'] if latest['atr_sma_14'] > 0 else 1
+        score += min(atr_ratio * 10, 20)
+
+        # Momentum (0–25)
+        roc = abs(latest['roc_14'])
+        score += min(roc * 20, 25)
+
         return score
 
     def analyze(self, df, df_higher=None, spread_pct=0.0):
@@ -126,7 +112,7 @@ class StrategyAgent:
         atr_value = latest['atr_14']
         atr_ratio_val = atr_value / latest['atr_sma_14'] if latest['atr_sma_14'] > 0 else 1.0
 
-        score_threshold = 60 # Minimum score required to trade
+        score_threshold = 30 # Minimum score required to trade
         
         signal = "HOLD"
         reason = "No valid setup found"
@@ -161,9 +147,9 @@ class StrategyAgent:
             
             # 2. Pullback Trend Strategy
             # Uptrend pullback
-            in_uptrend = latest['ema_21'] > latest['ema_50'] and previous['ema_21'] > previous['ema_50']
-            pulled_back = previous['low'] <= previous['ema_21'] and previous['close'] > previous['ema_21'] # bounced off EMA 20
-            resuming_up = price > latest['ema_9'] # Confirming move up
+            in_uptrend = latest['ema_21'] > latest['ema_50']
+            pulled_back = previous['low'] <= latest['ema_21'] or latest['low'] <= latest['ema_21']
+            resuming_up = price > latest['ema_9'] and price > previous['high']
             
             if signal == "HOLD" and in_uptrend and pulled_back and resuming_up and htf_bullish:
                 signal = "BUY"
@@ -171,9 +157,9 @@ class StrategyAgent:
                 reason = f"{strategy_name} - Score: {score}"
                 
             # Downtrend pullback
-            in_downtrend = latest['ema_21'] < latest['ema_50'] and previous['ema_21'] < previous['ema_50']
-            pulled_back_down = previous['high'] >= previous['ema_21'] and previous['close'] < previous['ema_21']
-            resuming_down = price < latest['ema_9']
+            in_downtrend = latest['ema_21'] < latest['ema_50']
+            pulled_back_down = previous['high'] >= latest['ema_21'] or latest['high'] >= latest['ema_21']
+            resuming_down = price < latest['ema_9'] and price < previous['low']
             
             if signal == "HOLD" and in_downtrend and pulled_back_down and resuming_down and htf_bearish:
                 signal = "SELL"
@@ -216,7 +202,7 @@ class StrategyAgent:
         atr_value = latest['atr_14']
         atr_ratio_val = atr_value / latest['atr_sma_14'] if latest['atr_sma_14'] > 0 else 1.0
 
-        score_threshold = 60
+        score_threshold = getattr(self.config, 'CONFIDENCE_THRESHOLD', 0.5) * 100
         signal = "HOLD"
         reason = "No valid setup found"
         strategy_name = ""
@@ -232,39 +218,44 @@ class StrategyAgent:
                     htf_bearish = htf_latest['close'] < htf_latest['ema_50']
 
         if score >= score_threshold:
-            # 1. Breakout Strategy
-            is_breakout_up = price > latest['rolling_high_20'] and previous['close'] <= previous['rolling_high_20']
-            is_breakout_down = price < latest['rolling_low_20'] and previous['close'] >= previous['rolling_low_20']
-            vol_confirmed = latest['volume'] > latest['volume_sma_20']
+            ema_slope = abs(latest['ema_21'] - previous['ema_21']) / price
+            min_slope = getattr(self.config, 'EMA_SLOPE_THRESHOLD', 0.0005)
             
-            if is_breakout_up and vol_confirmed and htf_bullish:
-                signal, strategy_name = "BUY", "Breakout UP"
-                reason = f"{strategy_name} - Score: {score}"
-            elif is_breakout_down and vol_confirmed and htf_bearish:
-                signal, strategy_name = "SELL", "Breakout DOWN"
-                reason = f"{strategy_name} - Score: {score}"
+            # ROC Confirmation
+            momentum_up = latest['roc_14'] > 0
+            momentum_down = latest['roc_14'] < 0
+
+            # 1. Breakout Strategy (DISABLED due to low win-rate)
+            # buffer = 0.001  # 0.1% early entry
+            # is_breakout_up = price > latest['rolling_high_20']* (1 - buffer) and previous['close'] < latest['rolling_high_20']* (1 - buffer) and ema_slope > min_slope
+            # is_breakout_down = price < latest['rolling_low_20']* (1 + buffer) and previous['close'] > latest['rolling_low_20']* (1 + buffer) and ema_slope > min_slope
+            # vol_confirmed = latest['volume'] > latest['volume_sma_20']* getattr(self.config, 'VOLUME_SPIKE_MULTIPLIER', 1.5)
             
-            # 2. Pullback Strategy
-            in_uptrend = latest['ema_21'] > latest['ema_50'] and previous['ema_21'] > previous['ema_50']
-            pulled_back = previous['low'] <= previous['ema_21'] and previous['close'] > previous['ema_21']
-            resuming_up = price > latest['ema_9']
+            # if is_breakout_up and vol_confirmed and htf_bullish and momentum_up:
+            #     signal, strategy_name = "BUY", "Breakout UP"
+            #     reason = f"{strategy_name} - Score: {score}"
+            # elif is_breakout_down and vol_confirmed and htf_bearish and momentum_down:
+            #     signal, strategy_name = "SELL", "Breakout DOWN"
+            #     reason = f"{strategy_name} - Score: {score}"
             
-            if signal == "HOLD" and in_uptrend and pulled_back and resuming_up and htf_bullish:
+            # 2. Pullback Strategy (Primary Entry)
+            in_uptrend = latest['ema_21'] > latest['ema_50'] and ema_slope > min_slope
+            pulled_back = previous['low'] <= latest['ema_21'] or latest['low'] <= latest['ema_21']
+            resuming_up = price > latest['ema_9'] and price > previous['high'] and latest['close'] > latest['open']
+            
+            if signal == "HOLD" and in_uptrend and pulled_back and resuming_up and htf_bullish and momentum_up:
                 signal, strategy_name = "BUY", "Pullback UP"
                 reason = f"{strategy_name} - Score: {score}"
                 
-            in_downtrend = latest['ema_21'] < latest['ema_50'] and previous['ema_21'] < previous['ema_50']
-            pulled_back_down = previous['high'] >= previous['ema_21'] and previous['close'] < previous['ema_21']
-            resuming_down = price < latest['ema_9']
+            in_downtrend = latest['ema_21'] < latest['ema_50'] and ema_slope > min_slope
+            pulled_back_down = previous['high'] >= latest['ema_21'] or latest['high'] >= latest['ema_21']
+            resuming_down = price < latest['ema_9'] and price < previous['low'] and latest['close'] < latest['open']
             
-            if signal == "HOLD" and in_downtrend and pulled_back_down and resuming_down and htf_bearish:
+            if signal == "HOLD" and in_downtrend and pulled_back_down and resuming_down and htf_bearish and momentum_down:
                 signal, strategy_name = "SELL", "Pullback DOWN"
                 reason = f"{strategy_name} - Score: {score}"
 
-        if signal != "HOLD" and confidence < (score_threshold/100.0):
-            signal = "HOLD"
-
-        market_state = "TREND" if latest['ema_21'] > latest['ema_50'] or latest['ema_21'] < latest['ema_50'] else "RANGE"
+        market_state = "TREND" if abs(latest['ema_21'] - latest['ema_50']) / price > getattr(self.config, 'EMA_SLOPE_THRESHOLD', 0.0005) else "RANGE"
 
         return {
             "signal": signal,

@@ -142,13 +142,10 @@ class BacktestEngine:
             
             # Print periodic logs (don't log HOLDs to avoid terminal spam)
             if strategy_output['signal'] != "HOLD":
-                print(
-                    f"[{current_ts}] [Strategy] Signal: {strategy_output['signal']} | "
-                    f"Confidence: {strategy_output.get('confidence', 0):.2f}"
-                )
+                pass
 
             adaptive_params = self.learning_agent.get_adaptive_parameters()
-            decision = self.decision_agent.formulate_decision(strategy_output, current_price, balance, adaptive_params)
+            decision = self.decision_agent.formulate_decision(strategy_output, current_price, balance, adaptive_params, current_ts=current_ts.timestamp())
             
             if decision['action'] != "HOLD":
                 print(f"[{current_ts}] [Decision] Approved | Size: {decision.get('amount_usdt', 0):.2f} USDT")
@@ -191,6 +188,39 @@ class BacktestEngine:
         print(f"Max Drawdown: {drawdown:.2f}%")
         print(f"Final Balance: ${start_balance + total_pnl:.2f}")
         print("========================================\n")
+        
+        # ── NEW: Improvement — Save Backtest Results ─────────────────────
+        try:
+            import os
+            import csv
+            from datetime import datetime
+            
+            results_file = "backtest_summary.csv"
+            file_exists = os.path.exists(results_file)
+            
+            with open(results_file, mode='a', newline='') as f:
+                writer = csv.writer(f)
+                if not file_exists:
+                    writer.writerow([
+                        "Timestamp", "Symbol", "Timeframe", "Candles", 
+                        "Trades", "Win Rate (%)", "Profit Factor", 
+                        "Return (%)", "Max Drawdown (%)", "Final Balance"
+                    ])
+                
+                writer.writerow([
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    self.config.TRADING_PAIR,
+                    self.config.TIMEFRAME,
+                    getattr(self.config, 'BACKTEST_CANDLES', 'unknown'),
+                    trades_executed,
+                    f"{win_rate:.2f}",
+                    f"{profit_factor:.2f}",
+                    f"{return_pct:.2f}",
+                    f"{drawdown:.2f}",
+                    f"{start_balance + total_pnl:.2f}"
+                ])
+        except Exception as e:
+            print(f"Error saving backtest summary: {e}")
 
         return {
             "Trades": trades_executed,

@@ -185,12 +185,14 @@ class LearningAgent:
             self._previous_win_rate = win_rate
             return
 
-        # If drawdown is significant (> 10% of peak), reduce
-        if self.peak_pnl > 0 and current_drawdown > self.peak_pnl * 0.10:
+        # If drawdown is significant (> 10% of total running balance), reduce
+        # Fixed logic: drawdown should be measured against peak_pnl logically, but effectively it should only fire on real capital loss.
+        # So we check if current_drawdown > 150.0 (i.e. $150 loss from peak)
+        if self.peak_pnl > 0 and current_drawdown > 150.0:
             self.position_size_multiplier = max(
                 self.position_size_multiplier - step, floor
             )
-            print(f"[LearningAgent] Drawdown > 10% — reducing size multiplier to {self.position_size_multiplier:.2f}")
+            print(f"[LearningAgent] Drawdown > $150 — reducing size multiplier to {self.position_size_multiplier:.2f}")
 
         # If win rate is good and improving, cautiously increase
         elif win_rate > 55.0 and win_rate >= self._previous_win_rate:

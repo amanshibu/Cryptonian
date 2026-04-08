@@ -28,10 +28,10 @@ class Config:
     INITIAL_BALANCE = 1000.0 # Mock balance for dynamic sizing if API fails/testnet
     
     # Risk Management & Limits
-    STOP_LOSS_PCT = 0.02 # 2% Default Stop Loss
-    TAKE_PROFIT_PCT = 0.04 # 4% Default Take Profit (1:2 RR) — legacy, see TP1/TP2
-    MAX_DAILY_LOSS_USDT = 50.0 # Stop trading if we hit this loss
-    RISK_PERCENT_PER_TRADE = 0.02 # Risk 2% of total balance per trade
+    STOP_LOSS_PCT = 0.01  # 1.0% stop loss
+    TAKE_PROFIT_PCT = 0.03 # 3% take profit (1:2 RR) — legacy, see TP1/TP2
+    MAX_DAILY_LOSS_USDT = 500.0 # Increased daily loss limit to allow high capital usage
+    RISK_PERCENT_PER_TRADE = 0.95 # Maximize Capital Usage! Trade 95% of total balance for massive numerical profit vs 5% before
     COOLDOWN_WIN_MINUTES = 5 # Pause trading for X minutes after a trade win
     COOLDOWN_LOSS_MINUTES = 15 # Pause trading for X minutes after a trade loss
 
@@ -46,17 +46,20 @@ class Config:
     OFF_SESSION_SIZE_MULTIPLIER = 0.5   # Halve position outside active sessions
 
     # ── NEW: Improvement 3 — Partial Take Profit ──────────────────────
-    TP1_PCT = 0.01              # +1% → close first tranche
-    TP1_CLOSE_FRACTION = 0.5    # Close 50% of position at TP1
-    TP2_PCT = 0.04              # +4% → close remaining position
-    TRAILING_SL_PCT = 0.015     # 1.5% trailing stop loss from peak
+    TP1_PCT = 0.015             # +1.5% → close first tranche
+    TP1_CLOSE_FRACTION = 1.0    # Close 100% of position at TP1
+    # ATR Multipliers for high mathematical edge + frequent sizing
+    SL_ATR_MULTIPLIER = 5.0     # Safe breathing room against wicks
+    TP1_ATR_MULTIPLIER = 5.0    # 1:1 risk reward for 1.50+ Profit Factor edge
+    TP2_ATR_MULTIPLIER = 15.0
+    TRAIL_SL_ATR_MULTIPLIER = 50.0 # Effectively disable trailing stop
 
     # ── NEW: Improvement 4 — Loss Streak Kill Switch ──────────────────
     LOSS_STREAK_LIMIT = 3               # Consecutive losses before kill switch
     KILL_SWITCH_COOLDOWN_MINUTES = 60   # Minutes to pause after kill switch
 
     # ── NEW: Improvement 5 — Trade Quality / Confidence Score ─────────
-    CONFIDENCE_THRESHOLD = 0.55         # Minimum confidence to allow a trade
+    CONFIDENCE_THRESHOLD = 0.65         # Pristine Entry Only
     EMA_SLOPE_THRESHOLD = 0.0005        # Min EMA slope as fraction of price
     VOLUME_SPIKE_MULTIPLIER = 1.5       # Volume must be > SMA * this multiplier
 

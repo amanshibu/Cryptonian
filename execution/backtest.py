@@ -31,10 +31,12 @@ class BacktestExecution(BaseExecution):
 
     def place_order(self, symbol, side, amount):
         cost = amount * self.current_price
-        # Note: Decision agent handles daily PnL and checking balances mostly, 
-        # but execution could simulate slippage and fee.
+        fee_rate = 0.001  # 0.1%
         
-        fee_rate = 0.001 # 0.1% fee simulation
+        if side == "buy":
+            self.balance -= cost * (1 + fee_rate)
+        elif side == "sell":
+            self.balance += cost * (1 - fee_rate)
         
         order = {
             "id": f"BT_ORDER_{len(self.trades_history)+1}",
